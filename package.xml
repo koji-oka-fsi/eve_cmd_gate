@@ -36,6 +36,12 @@
   <depend>rclcpp_components</depend>
   <depend>autoware_adapi_v1_msgs</depend>
   <depend>std_srvs</depend>
+  <depend>audio_driver_msgs</depend>
+  <depend>dio_ros_driver</depend>
+  <depend>in_parking_msgs</depend>
+  <depend>sound_msgs</depend>
+
+  <test_depend>launch_testing_ament_cmake</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

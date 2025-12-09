@@ -29,14 +29,55 @@ endif()
 find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
 
-ament_auto_add_library(engage_srv_converter SHARED
+ament_auto_add_library(eve_cmd_gate SHARED
   src/eve_cmd_gate.cpp
 )
 
-rclcpp_components_register_node(engage_srv_converter
+# ヘッダファイル
+install(
+  DIRECTORY include/
+  DESTINATION include/${PROJECT_NAME}
+)
+
+# launchファイル
+install(
+  DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}
+)
+
+rclcpp_components_register_node(eve_cmd_gate
   PLUGIN "eve_cmd_gate::EveCmdGate"
   EXECUTABLE eve_cmd_gate_node)
+
+if(BUILD_TESTING)
+  find_package(ament_lint_auto REQUIRED)
+  find_package(ament_cmake_gtest REQUIRED)
+  find_package(launch_testing_ament_cmake REQUIRED)
+
+  ament_add_gtest(test_eve_cmd_gate test/test_eve_cmd_gate.cpp)
+  target_link_libraries(test_${PROJECT_NAME}
+    ${PROJECT_NAME}
+  )
+  target_include_directories(test_${PROJECT_NAME} PRIVATE
+  src
+)
+endif()
+
+# if(BUILD_TESTING)
+#   find_package(ament_lint_auto REQUIRED)
+#   ament_lint_auto_find_test_dependencies()
+#   ament_add_ros_isolated_gmock(test_${PROJECT_NAME}
+#     test/test_eve_cmd_gate.cpp
+#   )
+#   target_link_libraries(test_${PROJECT_NAME}
+#     ${PROJECT_NAME}
+#   )
+#   target_include_directories(test_${PROJECT_NAME} PRIVATE
+#   src
+# )
+# endif()
 
 ament_auto_package(INSTALL_TO_SHARE
   launch
 )
+# ament_add_launch_test(test/test_eve_cmd_gate_launch.py)
