@@ -21,6 +21,7 @@
 #include "std_srvs/srv/trigger.hpp"
 #include "tier4_external_api_msgs/srv/engage.hpp"
 #include "tier4_external_api_msgs/srv/set_operator.hpp"
+#include "go_interface_msgs/msg/vehicle_status.hpp"
 #include <chrono>
 
 using namespace std::chrono_literals;
@@ -69,6 +70,8 @@ protected:
   rclcpp::Publisher<autoware_adapi_v1_msgs::msg::LocalizationInitializationState>::SharedPtr pub_initilization_state_;
   rclcpp::Publisher<audio_driver_msgs::msg::SoundDriverRes>::SharedPtr pub_voice_res_;
   rclcpp::Publisher<sound_msgs::msg::SoundRequest>::SharedPtr pub_sound_request_initialpose_;
+  rclcpp::Publisher<autoware_state_machine_msgs::msg::StateLock>::SharedPtr pub_lock_state_;
+  rclcpp::Publisher<go_interface_msgs::msg::VehicleStatus>::SharedPtr pub_vehicle_status_;
 
   // Subscriber (Target Node Output)
   rclcpp::Subscription<autoware_state_machine_msgs::msg::StateLock>::SharedPtr sub_lock_state_;
@@ -148,6 +151,10 @@ protected:
       "/api/routing/route", rclcpp::QoS{1}.transient_local());
     pub_initilization_state_ = adapi_mock_->create_publisher<autoware_adapi_v1_msgs::msg::LocalizationInitializationState>(
       "/api/localization/initialization_state", rclcpp::QoS{3}.transient_local());
+    pub_lock_state_ = adapi_mock_->create_publisher<autoware_state_machine_msgs::msg::StateLock>(
+      "/go_interface/lock_state", rclcpp::QoS{3}.transient_local());
+    pub_vehicle_status_ = adapi_mock_->create_publisher<go_interface_msgs::msg::VehicleStatus>(
+      "api_vehicle_status", rclcpp::QoS{3}.transient_local());
     // define ADAPI_mock end
 
     // define sound_voice_alarm/audio_driver_mock start
@@ -692,3 +699,95 @@ TEST_F(EveCmdGateTest, Case_Initialized) {
 
 // }
 
+TEST_F(EveCmdGateTest, Case_WaitingEngage) {
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(adapi_mock_);
+  executor.add_node(sound_voice_alarm_audio_driver_mock_);
+  executor.add_node(cargo_loading_service_mock_);
+  executor.add_node(eve_node_output_sub_);
+
+  clear_status_lamp_queue();
+  clear_warning_lamp_queue();
+  clear_emergency_lamp_queue();
+
+  // target Input
+  // 起動開始
+  autoware_adapi_v1_msgs::msg::LocalizationInitializationState initialization_state_initializing;
+  initialization_state_initializing.state = autoware_adapi_v1_msgs::msg::LocalizationInitializationState::INITIALIZING;
+  pub_initilization_state_->publish(initialization_state_initializing);
+
+  // topicをpublishし終わったら、一旦待ち
+  {
+    auto start = std::chrono::steady_clock::now();
+    while ((std::chrono::steady_clock::now() - start) < std::chrono::seconds(5)) {
+      executor.spin_once(std::chrono::milliseconds(100));
+    }
+  }
+
+  // target Input
+  // 初期化完了
+  autoware_adapi_v1_msgs::msg::LocalizationInitializationState initialization_state_initialized;
+  initialization_state_initializing.state = autoware_adapi_v1_msgs::msg::LocalizationInitializationState::INITIALIZED;
+  pub_initilization_state_->publish(initialization_state_initialized);
+
+  // warning_lamp, emergency_lamp を待って期待値一致
+  EXPECT_TRUE(wait_for_in_parking_state(in_parking_msgs::msg::InParkingStatus::AW_UNAVAILABLE,
+    in_parking_msgs::msg::InParkingStatus::VEHICLE_MANUAL, 2000ms));
+
+  // warning_lamp, emergency_lamp を待って期待値一致
+  EXPECT_TRUE(wait_for_warning_lamp(false, 2000ms));
+  EXPECT_TRUE(wait_for_emergency_lamp(true, 2000ms));
+
+  // status_lamp
+  auto status_lamp_msgs = collect_status_lamp_msgs(8, 6000ms);
+  ASSERT_GE(status_lamp_msgs.size(), 6u);
+
+  EXPECT_TRUE(is_alternating(status_lamp_msgs));
+
+  double period = estimate_period_sec(status_lamp_msgs);
+  EXPECT_NEAR(period, PERIOD_FAST_BLINK_SEC, TOL_FAST_BLINK_SEC);
+
+  // sound_done を待って期待値一致
+  EXPECT_TRUE(wait_for_sound_done(autoware_state_machine_msgs::msg::StateMachine::STATE_CHECK_NODE_ALIVE, 2000ms));
+
+  // target Input
+  // STATE_WAITING_ENGAGE_INSTRUCTION
+  autoware_adapi_v1_msgs::msg::RouteState routing_state;
+  routing_state.state = autoware_adapi_v1_msgs::msg::RouteState::SET;
+  pub_routing_state_->publish(routing_state);
+
+  autoware_adapi_v1_msgs::msg::Route routing_route;
+  autoware_adapi_v1_msgs::msg::RouteData route_data;
+  routing_route.data.push_back(route_data);
+  pub_routing_route_->publish(routing_route);
+
+  autoware_adapi_v1_msgs::msg::OperationModeState operation_mode_state;
+  operation_mode_state.mode = autoware_adapi_v1_msgs::msg::OperationModeState::STOP;
+  operation_mode_state.is_autoware_control_enabled = false;
+  pub_operation_mode_state_->publish(operation_mode_state);
+
+  // warning_lamp, emergency_lamp を待って期待値一致
+  EXPECT_TRUE(wait_for_in_parking_state(in_parking_msgs::msg::InParkingStatus::AW_WAITING_FOR_ENGAGE,
+    in_parking_msgs::msg::InParkingStatus::VEHICLE_MANUAL, 2000ms));
+
+  // warning_lamp, emergency_lamp を待って期待値一致
+  EXPECT_TRUE(wait_for_warning_lamp(true, 2000ms));
+  EXPECT_TRUE(wait_for_emergency_lamp(false, 2000ms));
+
+  // STATE_WAITING_CALL_PERMISSION
+  autoware_state_machine_msgs::msg::StateLock lock_state;
+  lock_state.state = autoware_state_machine_msgs::msg::StateLock::STATE_ON;
+  pub_lock_state_->publish(lock_state);
+
+  go_interface_msgs::msg::VehicleStatus vehicle_state;
+  vehicle_state.voice_flg = true;
+  pub_vehicle_status_->publish(vehicle_state);
+
+  // warning_lamp, emergency_lamp を待って期待値一致
+  EXPECT_TRUE(wait_for_in_parking_state(in_parking_msgs::msg::InParkingStatus::AW_WAITING_FOR_ENGAGE,
+    in_parking_msgs::msg::InParkingStatus::VEHICLE_MANUAL, 2000ms));
+
+  // warning_lamp, emergency_lamp を待って期待値一致
+  EXPECT_TRUE(wait_for_warning_lamp(true, 2000ms));
+  EXPECT_TRUE(wait_for_emergency_lamp(false, 2000ms));
+}
