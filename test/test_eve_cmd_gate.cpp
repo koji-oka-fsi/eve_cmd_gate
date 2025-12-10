@@ -1,8 +1,10 @@
 
 #include <gtest/gtest.h>
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp/subscription_options.hpp>
 #include <deque>
 #include <chrono>
+#include <thread>
 #include "audio_driver_msgs/msg/sound_driver_res.hpp"
 #include "audio_driver_msgs/msg/sound_driver_ctrl.hpp"
 #include "sound_msgs/msg/sound_request.hpp"
@@ -103,16 +105,21 @@ protected:
   audio_driver_msgs::msg::SoundDriverCtrl sound_bgm_audio_cmd_;
 
   // parking系メッセージ
-  in_parking_msgs::msg::InParkingStatus::ConstSharedPtr msg_in_parking_state_;
+  in_parking_msgs::msg::InParkingStatus msg_in_parking_state_;
 
   tier4_external_api_msgs::msg::ResponseStatus srv_engage_res_;
   tier4_external_api_msgs::msg::ResponseStatus srv_set_operator_res_;
+
+  rclcpp::executors::SingleThreadedExecutor executor_;
+  std::thread spin_thread_;
 
   void SetUp() override {
     msgs_requesting_.clear();
     msgs_accepted_.clear();
     msgs_sound_state_.state = autoware_state_machine_msgs::msg::StateMachine::STATE_UNDEFINED;
     msgs_sound_state_.done = false;
+    msg_in_parking_state_.aw_state = 0xFF;
+    msg_in_parking_state_.vehicle_operation_mode = 0xFF;
     srv_engage_res_.code = tier4_external_api_msgs::msg::ResponseStatus::SUCCESS;
     srv_set_operator_res_.code = tier4_external_api_msgs::msg::ResponseStatus::SUCCESS;
     rclcpp::init(0, nullptr);
@@ -199,7 +206,8 @@ protected:
       [this](const in_parking_msgs::msg::InParkingStatus::SharedPtr msg)
       {
         std::lock_guard<std::mutex> lock(mtx_in_parking_state_);
-        msg_in_parking_state_ = msg;
+        msg_in_parking_state_.aw_state = msg->aw_state;
+        msg_in_parking_state_.vehicle_operation_mode = msg->vehicle_operation_mode;
         cv_in_parking_state_.notify_all();
       }
     );
@@ -296,10 +304,25 @@ protected:
     cli_set_request_start_api_ = client_node_->create_client<std_srvs::srv::Trigger>(
     "/api/autoware/set/start_request",
     rmw_qos_profile_services_default);
+
+    // executor_ = std::make_unique<rclcpp::executors::SingleThreadedExecutor>();
+    executor_.add_node(adapi_mock_);
+    executor_.add_node(sound_voice_alarm_audio_driver_mock_);
+    executor_.add_node(cargo_loading_service_mock_);
+    executor_.add_node(eve_node_output_sub_);
+
+    spin_thread_ = std::thread([this]{
+      while (rclcpp::ok()) {
+        executor_.spin_once(std::chrono::milliseconds(50));
+      }
+    });
   }
 
   void TearDown() override {
-    rclcpp::shutdown();
+    if (spin_thread_.joinable()) {
+      rclcpp::shutdown();  // or stop flag
+      spin_thread_.join();
+    }
   }
 
   // output status_lamp キューをクリア
@@ -397,7 +420,7 @@ protected:
   bool wait_for_sound_done(bool expected_sound_done_state,
                          std::chrono::milliseconds timeout = 2000ms) {
     std::unique_lock<std::mutex> lock(mtx_sound_done_);
-    bool ok = cv_sound_done_.wait_for(lock, timeout, [this]{ return !msgs_sound_state_.state == autoware_state_machine_msgs::msg::StateMachine::STATE_UNDEFINED; });
+    bool ok = cv_sound_done_.wait_for(lock, timeout, [this]{ return msgs_sound_state_.state != autoware_state_machine_msgs::msg::StateMachine::STATE_UNDEFINED; });
     if (!ok) return false;
 
     return msgs_sound_state_.state == expected_sound_done_state;
@@ -408,12 +431,12 @@ protected:
                          int32_t expected_vehicle_operation_mode,
                          std::chrono::milliseconds timeout = 2000ms) {
     std::unique_lock<std::mutex> lock(mtx_in_parking_state_);
-    bool ok = cv_in_parking_state_.wait_for(lock, timeout, [this]{ return !msg_in_parking_state_; });
+    bool ok = cv_in_parking_state_.wait_for(lock, timeout, [this]{ return msg_in_parking_state_.aw_state != 0xFF; });
     if (!ok) return false;
 
     bool ret = false;
-    if ((msg_in_parking_state_->aw_state == expected_aw_state)
-      && (msg_in_parking_state_->vehicle_operation_mode == expected_vehicle_operation_mode)) {
+    if ((msg_in_parking_state_.aw_state == expected_aw_state)
+      && (msg_in_parking_state_.vehicle_operation_mode == expected_vehicle_operation_mode)) {
       ret = true;
     }
     return ret;
@@ -438,12 +461,6 @@ protected:
 };
 
 TEST_F(EveCmdGateTest, Case_Initializing_SoundDone) {
-  rclcpp::executors::SingleThreadedExecutor executor;
-  executor.add_node(adapi_mock_);
-  executor.add_node(sound_voice_alarm_audio_driver_mock_);
-  executor.add_node(cargo_loading_service_mock_);
-  executor.add_node(eve_node_output_sub_);
-
   clear_status_lamp_queue();
   clear_warning_lamp_queue();
   clear_emergency_lamp_queue();
@@ -485,12 +502,6 @@ TEST_F(EveCmdGateTest, Case_Initializing_SoundDone) {
 }
 
 TEST_F(EveCmdGateTest, Case_Initialized) {
-  rclcpp::executors::SingleThreadedExecutor executor;
-  executor.add_node(adapi_mock_);
-  executor.add_node(sound_voice_alarm_audio_driver_mock_);
-  executor.add_node(cargo_loading_service_mock_);
-  executor.add_node(eve_node_output_sub_);
-
   clear_status_lamp_queue();
   clear_warning_lamp_queue();
   clear_emergency_lamp_queue();
@@ -505,7 +516,7 @@ TEST_F(EveCmdGateTest, Case_Initialized) {
   {
     auto start = std::chrono::steady_clock::now();
     while ((std::chrono::steady_clock::now() - start) < std::chrono::seconds(5)) {
-      executor.spin_once(std::chrono::milliseconds(100));
+      executor_.spin_once(std::chrono::milliseconds(100));
     }
   }
 
