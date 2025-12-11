@@ -1,26 +1,16 @@
 
 #include <gtest/gtest.h>
 #include <rclcpp/rclcpp.hpp>
-#include <rclcpp/subscription_options.hpp>
 #include <deque>
 #include <chrono>
-#include <thread>
-#include "audio_driver_msgs/msg/sound_driver_res.hpp"
-#include "audio_driver_msgs/msg/sound_driver_ctrl.hpp"
-#include "sound_msgs/msg/sound_request.hpp"
 #include "autoware_adapi_v1_msgs/msg/operation_mode_state.hpp"
-#include "autoware_adapi_v1_msgs/msg/route_state.hpp"
-#include "autoware_adapi_v1_msgs/msg/route.hpp"
+
 #include "autoware_adapi_v1_msgs/msg/localization_initialization_state.hpp"
 #include "autoware_state_machine_msgs/msg/state_lock.hpp"
-#include "autoware_state_machine_msgs/msg/state_sound_done.hpp"
-#include "autoware_state_machine_msgs/msg/state_machine.hpp"
+#include "autoware_state_machine_msgs/msg/vehicle_button.hpp"
+#include "shutdown_manager_msgs/msg/state_shutdown.hpp"
 #include "dio_ros_driver/msg/dio_port.hpp"
-#include "in_parking_msgs/msg/in_parking_status.hpp"
-#include "eve_cmd_gate_msgs/msg/engage_request_state.hpp"
-#include "std_srvs/srv/trigger.hpp"
-#include "tier4_external_api_msgs/srv/engage.hpp"
-#include "tier4_external_api_msgs/srv/set_operator.hpp"
+#include "tier4_external_api_msgs/msg/operator.hpp"
 #include <chrono>
 
 using namespace std::chrono_literals;
@@ -37,240 +27,128 @@ protected:
     std::chrono::steady_clock::time_point tp;
   };
   // 排他制御
-  std::mutex mtx_status_lamp_;
-  std::mutex mtx_warning_lamp_;
-  std::mutex mtx_emergency_lamp_;
-  std::mutex mtx_sound_done_;
-  std::mutex mtx_in_parking_state_;
+  std::mutex mtx_resevation_lamp_;
+  std::mutex mtx_shutdown_;
+  std::mutex mtx_button_output_;
+  std::mutex mtx_resevation_button_;
 
   // subscriberと期待値チェック同期
-  std::condition_variable cv_status_lamp_;
-  std::condition_variable cv_warning_lamp_;
-  std::condition_variable cv_emergency_lamp_;
-  std::condition_variable cv_sound_done_;
-  std::condition_variable cv_sound_voice_alarm_audio_cmd_;
-  std::condition_variable cv_in_parking_state_;
+  std::condition_variable cv_resevation_lamp_;
+  std::condition_variable cv_shutdown_;
+  std::condition_variable cv_button_output_;
+  std::condition_variable cv_resevation_button_;
 
   // テストノード
-  std::shared_ptr<rclcpp::Node> client_node_;
-  std::shared_ptr<rclcpp::Node> service_node_;
-  std::shared_ptr<rclcpp::Node> pub_sub_node_;
-  std::shared_ptr<rclcpp::Node> adapi_mock_;
-  std::shared_ptr<rclcpp::Node> sound_voice_alarm_audio_driver_mock_;
-  std::shared_ptr<rclcpp::Node> sound_bgm_audio_driver_mock_;
-  std::shared_ptr<rclcpp::Node> initial_pose_mock_;
-  std::shared_ptr<rclcpp::Node> cargo_loading_service_mock_;
+  std::shared_ptr<rclcpp::Node> reservation_button_mock_;
+  std::shared_ptr<rclcpp::Node> button_output_selector_mock_;
+  std::shared_ptr<rclcpp::Node> shutdown_mock_;
   std::shared_ptr<rclcpp::Node> eve_node_output_sub_;
 
   // Publisher (Target Node Input)
-  rclcpp::Publisher<autoware_adapi_v1_msgs::msg::OperationModeState>::SharedPtr pub_operation_mode_state_;
-  rclcpp::Publisher<autoware_adapi_v1_msgs::msg::RouteState>::SharedPtr pub_routing_state_;
-  rclcpp::Publisher<autoware_adapi_v1_msgs::msg::Route>::SharedPtr pub_routing_route_;
-  rclcpp::Publisher<autoware_adapi_v1_msgs::msg::LocalizationInitializationState>::SharedPtr pub_initilization_state_;
-  rclcpp::Publisher<audio_driver_msgs::msg::SoundDriverRes>::SharedPtr pub_voice_res_;
-  rclcpp::Publisher<sound_msgs::msg::SoundRequest>::SharedPtr pub_sound_request_initialpose_;
+  rclcpp::Publisher<autoware_state_machine_msgs::msg::VehicleButton>::SharedPtr pub_button_;
+  rclcpp::Publisher<autoware_state_machine_msgs::msg::VehicleButton>::SharedPtr pub_button_driver_;
+  rclcpp::Publisher<shutdown_manager_msgs::msg::StateShutdown>::SharedPtr pub_shutdown_state_;
+  rclcpp::Publisher<dio_ros_driver::msg::DIOPort>::SharedPtr pub_delivery_reservation_lamp_;
+  rclcpp::Publisher<dio_ros_driver::msg::DIOArray>::SharedPtr din_port_array_publisher_;  
 
   // Subscriber (Target Node Output)
-  rclcpp::Subscription<autoware_state_machine_msgs::msg::StateLock>::SharedPtr sub_lock_state_;
-  rclcpp::Subscription<eve_cmd_gate_msgs::msg::EngageRequestState>::SharedPtr sub_engage_request_state_;
-  rclcpp::Subscription<autoware_state_machine_msgs::msg::StateSoundDone>::SharedPtr sub_state_sound_done_;
-  rclcpp::Subscription<audio_driver_msgs::msg::SoundDriverCtrl>::SharedPtr sub_voice_cmd_;
-  rclcpp::Subscription<audio_driver_msgs::msg::SoundDriverCtrl>::SharedPtr sub_bgm_cmd_;
-  rclcpp::Subscription<tier4_external_api_msgs::msg::ResponseStatus>::SharedPtr sub_sound_response_initialpose_;
-  rclcpp::Subscription<in_parking_msgs::msg::InParkingStatus>::SharedPtr sub_in_parking_state_;
-  rclcpp::Subscription<dio_ros_driver::msg::DIOPort>::SharedPtr sub_status_lamp_;
-  rclcpp::Subscription<dio_ros_driver::msg::DIOPort>::SharedPtr sub_emergency_lamp_;
-  rclcpp::Subscription<dio_ros_driver::msg::DIOPort>::SharedPtr sub_warning_lamp_;
-
-  // Client (Target Node Input)
-  rclcpp::Client<tier4_external_api_msgs::srv::Engage>::SharedPtr cli_engage_;
-  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr cli_set_request_start_api_;
-
-  // Service (Target Node Output)
-  rclcpp::Service<tier4_external_api_msgs::srv::Engage>::SharedPtr srv_engage_;
-  rclcpp::Service<tier4_external_api_msgs::srv::SetOperator>::SharedPtr srv_set_operator_;
-
-  std::vector<uint8_t> msgs_requesting_;
-  std::vector<uint8_t> msgs_accepted_;
-  autoware_state_machine_msgs::msg::StateSoundDone msgs_sound_state_;
-  std::vector<uint8_t> msgs_sound_done_;
+  rclcpp::Subscription<tier4_external_api_msgs::msg::Operator>::SharedPtr sub_get_operator_;
+  rclcpp::Subscription<autoware_state_machine_msgs::msg::VehicleButton>::SharedPtr sub_button_;
+  rclcpp::Subscription<autoware_state_machine_msgs::msg::VehicleButton>::SharedPtr sub_shutdown_button_;
+  rclcpp::Subscription<shutdown_manager_msgs::msg::StateShutdown>::SharedPtr sub_shutdown_state_;
+  rclcpp::Subscription<dio_ros_driver::msg::DIOArray>::SharedPtr dout_port_array_subscriber_;
 
   // lamp系のメッセージ
-  std::deque<STLampDIO> msg_status_lamp_;
-  std::deque<STLampDIO> msg_warning_lamp_;
-  std::deque<STLampDIO> msg_emergency_lamp_;
+  std::deque<STLampDIO> msg_reservation_lamp_;
 
-  // audio系メッセージ
-  audio_driver_msgs::msg::SoundDriverCtrl::ConstSharedPtr msgs_sound_voice_alarm_audio_cmd_;
-  audio_driver_msgs::msg::SoundDriverCtrl sound_bgm_audio_cmd_;
-
-  // parking系メッセージ
-  in_parking_msgs::msg::InParkingStatus msg_in_parking_state_;
-
-  tier4_external_api_msgs::msg::ResponseStatus srv_engage_res_;
-  tier4_external_api_msgs::msg::ResponseStatus srv_set_operator_res_;
-
-  rclcpp::executors::SingleThreadedExecutor executor_;
-  std::thread spin_thread_;
+  //button系メッセージ
+  autoware_state_machine_msgs::msg::VehicleButton::ConstSharedPtr msgs_button_driver_;
+  autoware_state_machine_msgs::msg::VehicleButton::ConstSharedPtr button_state_;
+  //shutdown系メッセージ
+  shutdown_manager_msgs::msg::StateShutdown::ConstSharedPtr msg_shutdown_state_;
 
   void SetUp() override {
-    msgs_requesting_.clear();
-    msgs_accepted_.clear();
+    msg_reservation_lamp_.clear();
+    msgs_button_driver_.clear();
+    button_state_.clear();
     msgs_sound_state_.state = autoware_state_machine_msgs::msg::StateMachine::STATE_UNDEFINED;
-    msgs_sound_state_.done = false;
-    msg_in_parking_state_.aw_state = 0xFF;
-    msg_in_parking_state_.vehicle_operation_mode = 0xFF;
-    srv_engage_res_.code = tier4_external_api_msgs::msg::ResponseStatus::SUCCESS;
-    srv_set_operator_res_.code = tier4_external_api_msgs::msg::ResponseStatus::SUCCESS;
+    msg_shutdown_state_.done = false;
     rclcpp::init(0, nullptr);
-    eve_node_output_sub_ = std::make_shared<rclcpp::Node>("test_eve_node_output_sub");
-    adapi_mock_ = std::make_shared<rclcpp::Node>("test_adapi_mock");
-    sound_voice_alarm_audio_driver_mock_ = std::make_shared<rclcpp::Node>("test_sound_voice_alarm_audio_driver_mock");
-    sound_bgm_audio_driver_mock_ = std::make_shared<rclcpp::Node>("test_sound_bgm_audio_driver_mock");
-    initial_pose_mock_ = std::make_shared<rclcpp::Node>("test_initial_pose_mock");
-    client_node_ = std::make_shared<rclcpp::Node>("test_node_client");
-    service_node_ = std::make_shared<rclcpp::Node>("test_node_service");
+    reservation_button_mock_ = std::make_shared<rclcpp::Node>("test_reservation_button_mock_");
+    button_output_selector_mock_ = std::make_shared<rclcpp::Node>("test_button_output_selector_mock_");
+    shutdown_mock_ = std::make_shared<rclcpp::Node>("test_shutdown_mock_");
+    eve_node_output_sub_ = std::make_shared<rclcpp::Node>("test_eve_node_output_sub_");
 
-    // define dio_ros_driver_node_mock start
+    // define reservation_button_mock_ start
     // Publisher
-    // Subscriber
-    // Cliengt
-    // Service
-    // define dio_ros_driver_node_mock end
+    pub_button_ = reservation_button_mock_->create_publisher<autoware_state_machine_msgs::msg::VehicleButton>(
+    "/delivery_reservation_button_manager/output/delivery_reservation_button",
+    rclcpp::QoS{1}.transient_local());
+    // define reservation_button_mock_ end
 
-    // define ADAPI_mock start
+
+    // define button_output_selector_mock_ start
     // Publisher
-    pub_operation_mode_state_ = adapi_mock_->create_publisher<autoware_adapi_v1_msgs::msg::OperationModeState>(
-      "/api/operation_mode/state", rclcpp::QoS{1}.transient_local());
-    pub_routing_state_ = adapi_mock_->create_publisher<autoware_adapi_v1_msgs::msg::RouteState>(
-      "/api/routing/state", rclcpp::QoS{1}.transient_local());
-    pub_routing_route_ = adapi_mock_->create_publisher<autoware_adapi_v1_msgs::msg::Route>(
-      "/api/routing/route", rclcpp::QoS{1}.transient_local());
-    pub_initilization_state_ = adapi_mock_->create_publisher<autoware_adapi_v1_msgs::msg::LocalizationInitializationState>(
-      "/api/localization/initialization_state", rclcpp::QoS{3}.transient_local());
-    // define ADAPI_mock end
+    pub_button_driver_ = button_output_selector_mock_->create_publisher<autoware_state_machine_msgs::msg::VehicleButton>(
+      "/shutdown_button", rclcpp::QoS{3}.transient_local());
+    // Subscriber
+    sub_button_ = button_output_selector_mock_->create_subscription<autoware_state_machine_msgs::msg::VehicleButton>(
+      "/delivery_reservation_button_manager/output/delivery_reservation_button", rclcpp::QoS{5}.transient_local(),
+      [this](const autoware_state_machine_msgs::msg::VehicleButton::SharedPtr msg)
+      {
+        std::lock_guard<std::mutex> lock(mtx_button_output_);
+        msgs_button_driver_ = msg;
+        cv_button_output_.notify_all();
 
-    // define sound_voice_alarm/audio_driver_mock start
+        tier4_external_api_msgs::msg::Operator operator_mode;
+        pub_button_driver_->publish(operator_mode);
+      }
+    );
+    sub_get_operator_ = button_output_selector_mock_->create_subscription<Operator>(
+    "/api/external/get/operator" rclcpp::QoS{5}.transient_local(),
+    [this](const tier4_external_api_msgs::msg::Operator::SharedPtr msg)
+    {
+      std::lock_guard<std::mutex> lock(mtx_button_output_);
+      msgs_button_driver_ =msg->mode;
+      cv_button_output_.notify_all();
+    }
+    );
+    // define button_output_selector_mock_ end
+
+    // define shutdown_mock_ start
+    // piblisher
+      pub_shutdown_state_ = shutdown_mock_->create_subscription<shutdown_manager_msgs::msg::StateShutdown>(
+      "/shutdown_manager/state",rclcpp::QoS{5}.transient_local(),
+    )
+    // Subscriber
+    sub_shutdown_button_ = shutdown_mock_->create_subscription<autoware_state_machine_msgs::msg::VehicleButton>(
+      "/shutdown_button", rclcpp::QoS{5}.transient_local(),
+      [this](const autoware_state_machine_msgs::msg::VehicleButton::SharedPtr msg)
+      {
+        std::lock_guard<std::mutex> lock(mtx_shutdown_);
+        button_state.data= msg->data;
+        button_state.hold_down_time=msg->hold_down_time
+        cv_shutdown_.notify_all();
+      }
+    );
+
+    // define shutdown_mock_ end
+
+    // define eve_node_output_sub_ start
     // Publisher
-    pub_voice_res_ = sound_voice_alarm_audio_driver_mock_->create_publisher<audio_driver_msgs::msg::SoundDriverRes>(
-      "/sound_voice_alarm/audio_res", rclcpp::QoS{3}.transient_local());
+    pub_delivery_reservation_lamp_ = eve_node_output_sub_->create_publisher<dio_ros_driver::msg::DIOPort>(
+      "delivery_reservation_lamp_out", rclcpp::QoS{3}.transient_local());
     // Subscriber
-    sub_voice_cmd_ = sound_voice_alarm_audio_driver_mock_->create_subscription<audio_driver_msgs::msg::SoundDriverCtrl>(
-      "/sound_voice_alarm/audio_cmd", rclcpp::QoS{5}.transient_local(),
-      [this](const audio_driver_msgs::msg::SoundDriverCtrl::SharedPtr msg)
+    sub_shutdown_state_ = eve_node_output_sub_->create_subscription<tier4_external_api_msgs::msg::ResponseStatus>(
+      "/shutdown_manager/state", rclcpp::QoS{3}.transient_local(),
+      [this](const shutdown_manager_msgs::msg::StateShutdown::SharedPtr msg)
       {
-        msgs_sound_voice_alarm_audio_cmd_ = msg;
-        cv_sound_voice_alarm_audio_cmd_.notify_all();
-
-        audio_driver_msgs::msg::SoundDriverRes sound_res;
-        pub_voice_res_->publish(sound_res);
+        std::lock_guard<std::mutex> lock(cv_resevation_lamp_);
+        msg_shutdown_state_ = msg->state;
+        cv_resevation_lamp_.notify_all();
       }
     );
-    // define sound_voice_alarm/audio_driver_mock end
-
-    // define sound_bgm_audio_driver_mock start
-    // Subscriber
-    sub_bgm_cmd_ = sound_bgm_audio_driver_mock_->create_subscription<audio_driver_msgs::msg::SoundDriverCtrl>(
-      "/sound_bgm/audio_cmd", rclcpp::QoS{5}.transient_local(),
-      [this](const audio_driver_msgs::msg::SoundDriverCtrl::SharedPtr msg)
-      {
-        // TODO：必要に応じて実装
-        // sound_bgm_audio_cmd_.type msg->cmd_type;
-        // sound_bgm_audio_cmd_.file_path = msg->file_path;
-        // sound_bgm_audio_cmd_.volume = msg->volume;
-        // sound_bgm_audio_cmd_.is_loop = msg->is_loop;
-        // sound_bgm_audio_cmd_.loop_delay = msg->loop_delay;
-        // sound_bgm_audio_cmd_.start_delay = msg->start_delay;
-      }
-    );
-    // define sound_bgm_audio_driver_mock end
-
-    // define initial_pose_mock start
-    // Publisher
-    pub_sound_request_initialpose_ = initial_pose_mock_->create_publisher<sound_msgs::msg::SoundRequest>(
-      "/localization/initial_pose/sound/request", rclcpp::QoS{3}.transient_local());
-    // Subscriber
-    sub_sound_response_initialpose_ = initial_pose_mock_->create_subscription<tier4_external_api_msgs::msg::ResponseStatus>(
-      "/localization/initial_pose/sound/response", rclcpp::QoS{3}.transient_local(),
-      [this](const tier4_external_api_msgs::msg::ResponseStatus::SharedPtr msg)
-      {
-        // TODO：必要に応じて実装
-      }
-    );
-    // define initial_pose_mock end
-
-    // define cargo_loading_service_mock start
-    // Subscriber
-    sub_in_parking_state_ = cargo_loading_service_mock_->create_subscription<in_parking_msgs::msg::InParkingStatus>(
-      "/in_parking/state", 1,
-      [this](const in_parking_msgs::msg::InParkingStatus::SharedPtr msg)
-      {
-        std::lock_guard<std::mutex> lock(mtx_in_parking_state_);
-        msg_in_parking_state_.aw_state = msg->aw_state;
-        msg_in_parking_state_.vehicle_operation_mode = msg->vehicle_operation_mode;
-        cv_in_parking_state_.notify_all();
-      }
-    );
-    // define cargo_loading_service_mock end
-
-    // define eve_node_output_sub start
-    // eveノードからpublishされるtopicを収集し、期待値と比較する
-    // Subscriber
-    sub_engage_request_state_ = eve_node_output_sub_->create_subscription<eve_cmd_gate_msgs::msg::EngageRequestState>(
-      "/eve_cmd_gate/engage_request_state", rclcpp::QoS{1}.transient_local(),
-      [this](const eve_cmd_gate_msgs::msg::EngageRequestState::SharedPtr msg)
-      {
-        // TODO：必要に応じて実装
-        // msgs_requesting_.push_back(msg->is_engage_requesting);
-        // msgs_accepted_.push_back(msg->is_engage_accepted);
-      }
-    );
-    sub_lock_state_ = eve_node_output_sub_->create_subscription<autoware_state_machine_msgs::msg::StateLock>(
-      "/go_interface/lock_state", rclcpp::QoS{1}.transient_local(),
-      [this](const autoware_state_machine_msgs::msg::StateLock::SharedPtr msg)
-      {
-        // TODO：必要に応じて実装
-        // msg->state;
-      }
-    );
-    sub_state_sound_done_ = eve_node_output_sub_->create_subscription<autoware_state_machine_msgs::msg::StateSoundDone>(
-      "/autoware_state_machine/state_sound_done", rclcpp::QoS{1}.transient_local(),
-      [this](const autoware_state_machine_msgs::msg::StateSoundDone::SharedPtr msg)
-      {
-        msgs_sound_state_.state = msg->state;
-        msgs_sound_state_.done = msg->done;
-        cv_sound_done_.notify_all();
-      }
-    );
-    sub_status_lamp_ = eve_node_output_sub_->create_subscription<dio_ros_driver::msg::DIOPort>(
-      "/dio/dout0", rclcpp::QoS{3}.transient_local(),
-      [this](const dio_ros_driver::msg::DIOPort::SharedPtr msg)
-      {
-        std::lock_guard<std::mutex> lock(mtx_status_lamp_);
-        msg_status_lamp_.push_back({msg->value, std::chrono::steady_clock::now()});
-        cv_status_lamp_.notify_all();
-      }
-    );
-    sub_emergency_lamp_ = eve_node_output_sub_->create_subscription<dio_ros_driver::msg::DIOPort>(
-      "/dio/dout1", rclcpp::QoS{3}.transient_local(),
-      [this](const dio_ros_driver::msg::DIOPort::SharedPtr msg)
-      {
-        std::lock_guard<std::mutex> lock(mtx_emergency_lamp_);
-        msg_emergency_lamp_.push_back({msg->value, std::chrono::steady_clock::now()});
-        cv_emergency_lamp_.notify_all();
-      }
-    );
-    sub_warning_lamp_ = eve_node_output_sub_->create_subscription<dio_ros_driver::msg::DIOPort>(
-      "/dio/dout2", rclcpp::QoS{3}.transient_local(),
-      [this](const dio_ros_driver::msg::DIOPort::SharedPtr msg)
-      {
-        std::lock_guard<std::mutex> lock(mtx_warning_lamp_);
-        msg_warning_lamp_.push_back({msg->value, std::chrono::steady_clock::now()});
-        cv_warning_lamp_.notify_all();
-      }
-    );
-    // define eve_node_output_sub end
-
+    // define eve_node_output_sub_ end
 
     // define xxx_mock start
     // Publisher
@@ -279,73 +157,16 @@ protected:
     // Service
     // define xxx_mock end
 
-    // Service
-    srv_engage_ = service_node_->create_service<tier4_external_api_msgs::srv::Engage>(
-    "/api/autoware/set/engage",
-    [this](const tier4_external_api_msgs::srv::Engage::Request::SharedPtr request,
-        const tier4_external_api_msgs::srv::Engage::Response::SharedPtr response){
-        response->status = srv_engage_res_;
-    });
-
-    srv_set_operator_ = service_node_->create_service<tier4_external_api_msgs::srv::SetOperator>(
-    "/api/autoware/set/operator",
-    [this](const tier4_external_api_msgs::srv::SetOperator::Request::SharedPtr request,
-        const tier4_external_api_msgs::srv::SetOperator::Response::SharedPtr response)
-        {
-        response->status.code = srv_set_operator_res_.code;
-        }
-    );
-
-    // Client
-    cli_engage_ = client_node_->create_client<tier4_external_api_msgs::srv::Engage>(
-    "/api/external/set/engage",
-    rmw_qos_profile_services_default);
-
-    cli_set_request_start_api_ = client_node_->create_client<std_srvs::srv::Trigger>(
-    "/api/autoware/set/start_request",
-    rmw_qos_profile_services_default);
-
-    // executor_ = std::make_unique<rclcpp::executors::SingleThreadedExecutor>();
-    executor_.add_node(adapi_mock_);
-    executor_.add_node(sound_voice_alarm_audio_driver_mock_);
-    executor_.add_node(cargo_loading_service_mock_);
-    executor_.add_node(eve_node_output_sub_);
-
-    spin_thread_ = std::thread([this]{
-      while (rclcpp::ok()) {
-        executor_.spin_once(std::chrono::milliseconds(50));
-      }
-    });
   }
-
   void TearDown() override {
-    if (spin_thread_.joinable()) {
-      rclcpp::shutdown();  // or stop flag
-      spin_thread_.join();
-    }
+    rclcpp::shutdown();
   }
 
-  // output status_lamp キューをクリア
-  void clear_status_lamp_queue() {
+  // output reservation_lamp キューをクリア
+  void clear_reservation_lamp_queue() {
     {
-      std::lock_guard<std::mutex> lock(mtx_status_lamp_);
-      msg_status_lamp_.clear();
-    }
-  }
-
-  // output warning_lamp キューをクリア
-  void clear_warning_lamp_queue() {
-    {
-      std::lock_guard<std::mutex> lock(mtx_warning_lamp_);
-      msg_warning_lamp_.clear();
-    }
-  }
-
-  // output emergency_lamp キューをクリア
-  void clear_emergency_lamp_queue() {
-    {
-      std::lock_guard<std::mutex> lock(mtx_emergency_lamp_);
-      msg_emergency_lamp_.clear();
+      std::lock_guard<std::mutex> lock(cv_resevation_lamp_);
+      msg_reservation_lamp_.clear();
     }
   }
 
@@ -420,7 +241,7 @@ protected:
   bool wait_for_sound_done(bool expected_sound_done_state,
                          std::chrono::milliseconds timeout = 2000ms) {
     std::unique_lock<std::mutex> lock(mtx_sound_done_);
-    bool ok = cv_sound_done_.wait_for(lock, timeout, [this]{ return msgs_sound_state_.state != autoware_state_machine_msgs::msg::StateMachine::STATE_UNDEFINED; });
+    bool ok = cv_sound_done_.wait_for(lock, timeout, [this]{ return !msgs_sound_state_.state == autoware_state_machine_msgs::msg::StateMachine::STATE_UNDEFINED; });
     if (!ok) return false;
 
     return msgs_sound_state_.state == expected_sound_done_state;
@@ -431,18 +252,18 @@ protected:
                          int32_t expected_vehicle_operation_mode,
                          std::chrono::milliseconds timeout = 2000ms) {
     std::unique_lock<std::mutex> lock(mtx_in_parking_state_);
-    bool ok = cv_in_parking_state_.wait_for(lock, timeout, [this]{ return msg_in_parking_state_.aw_state != 0xFF; });
+    bool ok = cv_in_parking_state_.wait_for(lock, timeout, [this]{ return !msg_in_parking_state_; });
     if (!ok) return false;
 
     bool ret = false;
-    if ((msg_in_parking_state_.aw_state == expected_aw_state)
-      && (msg_in_parking_state_.vehicle_operation_mode == expected_vehicle_operation_mode)) {
+    if ((msg_in_parking_state_->aw_state == expected_aw_state)
+      && (msg_in_parking_state_->vehicle_operation_mode == expected_vehicle_operation_mode)) {
       ret = true;
     }
     return ret;
   }
-
-  // sound_voice_alarm/audio_cmd を待つ（timeout 以内、期待値チェックあり）
+  
+// sound_voice_alarm/audio_cmd を待つ（timeout 以内、期待値チェックあり）
 //   bool wait_for_sound_voice_alarm_audio_cmd(int32 expected_aw_state,
 //                          int32 expected_vehicle_operation_mode,
 //                          std::chrono::milliseconds timeout = 2000ms) {
@@ -461,6 +282,12 @@ protected:
 };
 
 TEST_F(EveCmdGateTest, Case_Initializing_SoundDone) {
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(adapi_mock_);
+  executor.add_node(sound_voice_alarm_audio_driver_mock_);
+  executor.add_node(cargo_loading_service_mock_);
+  executor.add_node(eve_node_output_sub_);
+
   clear_status_lamp_queue();
   clear_warning_lamp_queue();
   clear_emergency_lamp_queue();
@@ -502,6 +329,12 @@ TEST_F(EveCmdGateTest, Case_Initializing_SoundDone) {
 }
 
 TEST_F(EveCmdGateTest, Case_Initialized) {
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(adapi_mock_);
+  executor.add_node(sound_voice_alarm_audio_driver_mock_);
+  executor.add_node(cargo_loading_service_mock_);
+  executor.add_node(eve_node_output_sub_);
+
   clear_status_lamp_queue();
   clear_warning_lamp_queue();
   clear_emergency_lamp_queue();
@@ -516,7 +349,7 @@ TEST_F(EveCmdGateTest, Case_Initialized) {
   {
     auto start = std::chrono::steady_clock::now();
     while ((std::chrono::steady_clock::now() - start) < std::chrono::seconds(5)) {
-      executor_.spin_once(std::chrono::milliseconds(100));
+      executor.spin_once(std::chrono::milliseconds(100));
     }
   }
 
