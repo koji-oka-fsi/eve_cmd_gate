@@ -21,6 +21,11 @@
 #include "std_srvs/srv/trigger.hpp"
 #include "tier4_external_api_msgs/srv/engage.hpp"
 #include "tier4_external_api_msgs/srv/set_operator.hpp"
+#include <autoware_adapi_v1_msgs/msg/vehicle_status.hpp>
+#include "dio_ros_driver/msg/dio_array.hpp"
+#include "v2i_interface_msgs/msg/infrastructure_command_array.hpp"
+#include <tier4_external_api_msgs/msg/planning_factor_array.hpp>
+#include <autoware_adapi_v1_msgs/msg/vehicle_kinematics.hpp>
 #include <chrono>
 
 using namespace std::chrono_literals;
@@ -42,6 +47,8 @@ protected:
   std::mutex mtx_emergency_lamp_;
   std::mutex mtx_sound_done_;
   std::mutex mtx_in_parking_state_;
+  std::mutex mtx_display_manager_;
+  std::mutex mtx_vtl_commands_;
 
   // subscriberと期待値チェック同期
   std::condition_variable cv_status_lamp_;
@@ -50,6 +57,8 @@ protected:
   std::condition_variable cv_sound_done_;
   std::condition_variable cv_sound_voice_alarm_audio_cmd_;
   std::condition_variable cv_in_parking_state_;
+  std::condition_variable cv_display_manager_;
+  std::condition_variable cv_vtl_commands_;
 
   // テストノード
   std::shared_ptr<rclcpp::Node> client_node_;
@@ -69,6 +78,9 @@ protected:
   rclcpp::Publisher<autoware_adapi_v1_msgs::msg::LocalizationInitializationState>::SharedPtr pub_initilization_state_;
   rclcpp::Publisher<audio_driver_msgs::msg::SoundDriverRes>::SharedPtr pub_voice_res_;
   rclcpp::Publisher<sound_msgs::msg::SoundRequest>::SharedPtr pub_sound_request_initialpose_;
+  rclcpp::Publisher<autoware_adapi_v1_msgs::msg::VehicleStatus>::SharedPtr pub_vehicle_status_;
+  rclcpp::Publisher<tier4_external_api_msgs::msg::PlanningFactorArray>::SharedPtr pub_planning_factors_;
+  rclcpp::Publisher<autoware_adapi_v1_msgs::msg::VehicleKinematics>::SharedPtr pub_vehicle_kinematics_;
 
   // Subscriber (Target Node Output)
   rclcpp::Subscription<autoware_state_machine_msgs::msg::StateLock>::SharedPtr sub_lock_state_;
@@ -81,6 +93,8 @@ protected:
   rclcpp::Subscription<dio_ros_driver::msg::DIOPort>::SharedPtr sub_status_lamp_;
   rclcpp::Subscription<dio_ros_driver::msg::DIOPort>::SharedPtr sub_emergency_lamp_;
   rclcpp::Subscription<dio_ros_driver::msg::DIOPort>::SharedPtr sub_warning_lamp_;
+  rclcpp::Subscription<dio_ros_driver::msg::DIOArray>::SharedPtr sub_display_manager_;
+  rclcpp::Subscription<v2i_interface_msgs::msg::InfrastructureCommandArray>::SharedPtr sub_vtl_commands_;
 
   // Client (Target Node Input)
   rclcpp::Client<tier4_external_api_msgs::srv::Engage>::SharedPtr cli_engage_;
@@ -107,11 +121,20 @@ protected:
   // parking系メッセージ
   in_parking_msgs::msg::InParkingStatus msg_in_parking_state_;
 
+  // drive系メッセージ
+  #define DISPLAY_DOUT_PORTS_NUM (3)
+  std::vector<uint8_t> msg_display_manager_;
+  std::vector<uint8_t> msg_vtl_commands_;
+
   tier4_external_api_msgs::msg::ResponseStatus srv_engage_res_;
   tier4_external_api_msgs::msg::ResponseStatus srv_set_operator_res_;
 
   rclcpp::executors::SingleThreadedExecutor executor_;
   std::thread spin_thread_;
+
+  // Parameter
+  double moved_threshold_;
+  double dist_to_stop_pose_min_th_;
 
   void SetUp() override {
     msgs_requesting_.clear();
@@ -131,6 +154,12 @@ protected:
     client_node_ = std::make_shared<rclcpp::Node>("test_node_client");
     service_node_ = std::make_shared<rclcpp::Node>("test_node_service");
 
+    // Parameter
+    moved_threshold_ = initial_pose_mock_->declare_parameter<double>("moved_threshold", 1.0);
+    double stop_dist_to_prohibit_engage = initial_pose_mock_->declare_parameter<double>("stop_dist_to_prohibit_engage", 0.30);
+    // Add a value of 0.05 to `stop_dist_to_prohibit_engage`.
+    dist_to_stop_pose_min_th_ = stop_dist_to_prohibit_engage + 0.05;
+
     // define dio_ros_driver_node_mock start
     // Publisher
     // Subscriber
@@ -148,6 +177,8 @@ protected:
       "/api/routing/route", rclcpp::QoS{1}.transient_local());
     pub_initilization_state_ = adapi_mock_->create_publisher<autoware_adapi_v1_msgs::msg::LocalizationInitializationState>(
       "/api/localization/initialization_state", rclcpp::QoS{3}.transient_local());
+    pub_vehicle_status_ = adapi_mock_->create_publisher<autoware_adapi_v1_msgs::msg::VehicleStatus>(
+      "/api/vehicle/status", rclcpp::QoS{3}.transient_local());
     // define ADAPI_mock end
 
     // define sound_voice_alarm/audio_driver_mock start
@@ -269,8 +300,41 @@ protected:
         cv_warning_lamp_.notify_all();
       }
     );
+    sub_display_manager_ = eve_node_output_sub_->create_subscription<dio_ros_driver::msg::DIOArray>(
+      "/dio/dout_array", rclcpp::QoS{3}.transient_local(),
+      [this](const dio_ros_driver::msg::DIOArray::SharedPtr msg)
+      {
+        std::lock_guard<std::mutex> lock(mtx_display_manager_);
+        msg_display_manager_.clear();
+        for (int i = 0; i < DISPLAY_DOUT_PORTS_NUM; i++) {
+          msg_display_manager_.push_back(msg->values[i].value);
+        }
+        cv_display_manager_.notify_all();
+      }
+    );
+    sub_vtl_commands_ = eve_node_output_sub_->create_subscription<v2i_interface_msgs::msg::InfrastructureCommandArray>(
+      "/v2_gate/infrastructure_commands", rclcpp::QoS{3}.transient_local(),
+      [this](const v2i_interface_msgs::msg::InfrastructureCommandArray::SharedPtr msg)
+      {
+        std::lock_guard<std::mutex> lock(mtx_vtl_commands_);
+        msg_vtl_commands_.clear();
+        msg_vtl_commands_.push_back(msg->commands[0].state);
+        cv_vtl_commands_.notify_all();
+      }
+    );
     // define eve_node_output_sub end
 
+    // define stop_reason_mock start
+    // Publisher
+    pub_planning_factors_ = initial_pose_mock_->create_publisher<tier4_external_api_msgs::msg::PlanningFactorArray>(
+      "/planning/planning_factors", rclcpp::QoS{3}.transient_local());
+    // define stop_reason_mock end
+
+    // define vehicle_kinematics_mock start
+    // Publisher
+    pub_vehicle_kinematics_ = initial_pose_mock_->create_publisher<autoware_adapi_v1_msgs::msg::VehicleKinematics>(
+      "/api/vehicle/kinematics", rclcpp::QoS{3}.transient_local());
+    // define vehicle_kinematics_mock end
 
     // define xxx_mock start
     // Publisher
@@ -442,6 +506,74 @@ protected:
     return ret;
   }
 
+  // display_manager を待つ（timeout 以内、期待値チェックあり）
+  bool wait_for_display_manager(bool expected_dout_1, bool expected_dout_2, bool expected_dout_3,
+                         std::chrono::milliseconds timeout = 2000ms) {
+    std::unique_lock<std::mutex> lock(mtx_display_manager_);
+    bool ok = cv_display_manager_.wait_for(lock, timeout, [this]{ return !msg_display_manager_.empty(); });
+    if (!ok) return false;
+
+    auto msg_dout_1 = msg_display_manager_[0];
+    auto msg_dout_2 = msg_display_manager_[1];
+    auto msg_dout_3 = msg_display_manager_[2];
+    msg_display_manager_.clear();
+    return (expected_dout_1 == msg_dout_1 && expected_dout_2 == msg_dout_2 && expected_dout_3 == msg_dout_3);
+  }
+
+  // infrastructure commands を待つ（timeout 以内、期待値チェックあり）
+  bool wait_for_vtl_commands(bool expected_state,
+                         std::chrono::milliseconds timeout = 2000ms) {
+    std::unique_lock<std::mutex> lock(mtx_vtl_commands_);
+    bool ok = cv_vtl_commands_.wait_for(lock, timeout, [this]{ return !msg_vtl_commands_.empty(); });
+    if (!ok) return false;
+
+    auto msg_state = msg_vtl_commands_[0];
+    msg_vtl_commands_.clear();
+    return (expected_state == msg_state);
+  }
+
+  // stop reasonsをパブリッシュする
+  void publishStopReasons(bool is_obstacle_stop, bool is_detection_area, bool is_crosswalk, bool is_surround_obstacle_check, bool is_other_reason, double distance)
+  {
+    tier4_external_api_msgs::msg::PlanningFactorArray factorArray;
+    tier4_external_api_msgs::msg::PlanningFactor factor;
+
+    factor.behavior_type = tier4_external_api_msgs::msg::PlanningFactor::STOP;
+    factor.control_points[0].distance = distance;
+    if(is_obstacle_stop){
+      factor.behavior_name = tier4_external_api_msgs::msg::PlanningFactor::ROUTE_OBSTACLE;
+      factorArray.factors.push_back(factor);
+    }
+    if(is_detection_area){
+      factor.behavior_name = tier4_external_api_msgs::msg::PlanningFactor::USER_DEFINED_DETECTION_AREA;
+      factorArray.factors.push_back(factor);
+    }
+    if(is_crosswalk){
+      factor.behavior_name = tier4_external_api_msgs::msg::PlanningFactor::CROSSWALK;
+      factorArray.factors.push_back(factor);
+    }
+    if(is_surround_obstacle_check){
+      factor.behavior_name = tier4_external_api_msgs::msg::PlanningFactor::SURROUNDING_OBSTACLE;
+      factorArray.factors.push_back(factor);
+    }
+    if(is_other_reason){
+      factor.behavior_name = tier4_external_api_msgs::msg::PlanningFactor::STOP_SIGN;
+      factorArray.factors.push_back(factor);
+    }
+
+    pub_planning_factors_->publish(factorArray);
+  }
+
+  // vehicle kinematicsをパブリッシュする
+  void publishVehicleKinematics(double pose_x, double velocity)
+  {
+    autoware_adapi_v1_msgs::msg::VehicleKinematics vehicle_kinematics;
+    vehicle_kinematics.twist.twist.twist.linear.x = velocity;
+    vehicle_kinematics.pose.pose.pose.position.x = pose_x;
+
+    pub_vehicle_kinematics_->publish(vehicle_kinematics);
+  }
+
   // sound_voice_alarm/audio_cmd を待つ（timeout 以内、期待値チェックあり）
 //   bool wait_for_sound_voice_alarm_audio_cmd(int32 expected_aw_state,
 //                          int32 expected_vehicle_operation_mode,
@@ -459,6 +591,121 @@ protected:
 //   }
 
 };
+
+TEST_F(EveCmdGateTest, Case_AutoDrive_Running) {
+  clear_status_lamp_queue();
+  clear_warning_lamp_queue();
+  clear_emergency_lamp_queue();
+
+  // DRIVING
+  autoware_adapi_v1_msgs::msg::LocalizationInitializationState initialization_state_initializing;
+  initialization_state_initializing.state = autoware_adapi_v1_msgs::msg::LocalizationInitializationState::INITIALIZED;
+  pub_initilization_state_->publish(initialization_state_initializing);
+
+  autoware_adapi_v1_msgs::msg::RouteState routing_state;
+  routing_state.state = autoware_adapi_v1_msgs::msg::RouteState::SET;
+  pub_routing_state_->publish(routing_state);
+
+  autoware_adapi_v1_msgs::msg::Route routing_route;
+  autoware_adapi_v1_msgs::msg::RouteData route_data;
+  routing_route.data.push_back(route_data);
+  pub_routing_route_->publish(routing_route);
+
+  autoware_adapi_v1_msgs::msg::OperationModeState operation_mode_state;
+  operation_mode_state.mode = autoware_adapi_v1_msgs::msg::OperationModeState::AUTONOMOUS;
+  operation_mode_state.is_autoware_control_enabled = true;
+  pub_operation_mode_state_->publish(operation_mode_state);
+
+  // STATE_RUNNING
+  autoware_adapi_v1_msgs::msg::VehicleStatus vehicle_status;
+  vehicle_status.turn_indicators.status = autoware_adapi_v1_msgs::msg::TurnIndicators::DISABLE;
+  pub_vehicle_status_->publish(vehicle_status);
+
+  // 期待値チェック
+  ASSERT_TRUE(wait_for_display_manager(true, false, false, 2000ms));
+  ASSERT_TRUE(wait_for_vtl_commands(true, 2000ms));
+
+  // ARRIVAL_GOAL
+  routing_state.state = autoware_adapi_v1_msgs::msg::RouteState::ARRIVED;
+  pub_routing_state_->publish(routing_state);
+
+  // STATE_ARRIVED_GOAL
+
+  // 期待値チェック
+  ASSERT_TRUE(wait_for_display_manager(false, false, false, 2000ms));
+  ASSERT_TRUE(wait_for_vtl_commands(true, 2000ms));
+  ASSERT_TRUE(wait_for_in_parking_state(in_parking_msgs::msg::InParkingStatus::AW_ARRIVED_PARKING,
+    in_parking_msgs::msg::InParkingStatus::VEHICLE_AUTO, 2000ms));
+
+  // STATE_RESTART
+  auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+  auto restart_future = cli_set_request_start_api_->async_send_request(request);
+  auto result = executor_.spin_until_future_complete(restart_future, std::chrono::seconds(5));
+  ASSERT_EQ(result, rclcpp::FutureReturnCode::SUCCESS);
+  ASSERT_TRUE(cli_set_request_start_api_->wait_for_service(std::chrono::seconds(10)));
+
+  routing_state.state = autoware_adapi_v1_msgs::msg::RouteState::SET;
+  pub_routing_state_->publish(routing_state);
+  
+  // 期待値チェック
+  ASSERT_TRUE(wait_for_display_manager(true, false, false, 2000ms));
+  ASSERT_TRUE(wait_for_vtl_commands(true, 2000ms));
+}
+
+TEST_F(EveCmdGateTest, Case_AutoDrive_RunningToward) {
+  clear_status_lamp_queue();
+  clear_warning_lamp_queue();
+  clear_emergency_lamp_queue();
+
+  // DRIVING
+  autoware_adapi_v1_msgs::msg::LocalizationInitializationState initialization_state_initializing;
+  initialization_state_initializing.state = autoware_adapi_v1_msgs::msg::LocalizationInitializationState::INITIALIZED;
+  pub_initilization_state_->publish(initialization_state_initializing);
+
+  autoware_adapi_v1_msgs::msg::RouteState routing_state;
+  routing_state.state = autoware_adapi_v1_msgs::msg::RouteState::SET;
+  pub_routing_state_->publish(routing_state);
+
+  autoware_adapi_v1_msgs::msg::Route routing_route;
+  autoware_adapi_v1_msgs::msg::RouteData route_data;
+  routing_route.data.push_back(route_data);
+  pub_routing_route_->publish(routing_route);
+
+  autoware_adapi_v1_msgs::msg::OperationModeState operation_mode_state;
+  operation_mode_state.mode = autoware_adapi_v1_msgs::msg::OperationModeState::AUTONOMOUS;
+  operation_mode_state.is_autoware_control_enabled = true;
+  pub_operation_mode_state_->publish(operation_mode_state);
+
+  // STATE_RUNNING
+  autoware_adapi_v1_msgs::msg::VehicleStatus vehicle_status;
+  vehicle_status.turn_indicators.status = autoware_adapi_v1_msgs::msg::TurnIndicators::DISABLE;
+  pub_vehicle_status_->publish(vehicle_status);
+
+  // 期待値チェック
+  ASSERT_TRUE(wait_for_display_manager(true, false, false, 2000ms));
+  ASSERT_TRUE(wait_for_vtl_commands(true, 2000ms));
+
+  // STATE_RUNNING_TOWARD_STOP_LINE
+  bool is_obstacle_stop = false;
+  bool is_detection_area = false;
+  bool is_crosswalk = false;
+  bool is_surround_obstacle_check = false;
+  bool is_other_reason = false;
+  double distance = dist_to_stop_pose_min_th_ + 1.0;
+  publishStopReasons(is_obstacle_stop, is_detection_area, is_crosswalk, is_surround_obstacle_check, is_other_reason, distance);
+
+  // 期待値チェック
+  ASSERT_TRUE(wait_for_display_manager(true, false, false, 2000ms));
+  ASSERT_TRUE(wait_for_vtl_commands(true, 2000ms));
+  ASSERT_TRUE(wait_for_in_parking_state(in_parking_msgs::msg::InParkingStatus::AW_OUT_OF_PARKING,
+    in_parking_msgs::msg::InParkingStatus::VEHICLE_AUTO, 2000ms));
+
+}
+
+
+
+
+
 
 TEST_F(EveCmdGateTest, Case_Initializing_SoundDone) {
   clear_status_lamp_queue();
