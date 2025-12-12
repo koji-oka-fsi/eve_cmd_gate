@@ -22,6 +22,7 @@
 #include "tier4_external_api_msgs/srv/engage.hpp"
 #include "tier4_external_api_msgs/srv/set_operator.hpp"
 #include <chrono>
+#include <atomic>
 
 using namespace std::chrono_literals;
 // 期待周期と許容誤差
@@ -113,6 +114,16 @@ protected:
   rclcpp::executors::SingleThreadedExecutor executor_;
   std::thread spin_thread_;
 
+  std::atomic<bool> stop_{false}; // ★ spin終了フラグ
+
+  // ★ スイート単位で init / shutdown（GuardConditionの context=null を回避）
+  static void SetUpTestSuite() {
+    if (!rclcpp::ok()) { rclcpp::init(0, nullptr); }
+  }
+  static void TearDownTestSuite() {
+    if (rclcpp::ok()) { rclcpp::shutdown(); }
+  }
+
   void SetUp() override {
     msgs_requesting_.clear();
     msgs_accepted_.clear();
@@ -122,7 +133,6 @@ protected:
     msg_in_parking_state_.vehicle_operation_mode = 0xFF;
     srv_engage_res_.code = tier4_external_api_msgs::msg::ResponseStatus::SUCCESS;
     srv_set_operator_res_.code = tier4_external_api_msgs::msg::ResponseStatus::SUCCESS;
-    rclcpp::init(0, nullptr);
     eve_node_output_sub_ = std::make_shared<rclcpp::Node>("test_eve_node_output_sub");
     adapi_mock_ = std::make_shared<rclcpp::Node>("test_adapi_mock");
     sound_voice_alarm_audio_driver_mock_ = std::make_shared<rclcpp::Node>("test_sound_voice_alarm_audio_driver_mock");
@@ -130,6 +140,8 @@ protected:
     initial_pose_mock_ = std::make_shared<rclcpp::Node>("test_initial_pose_mock");
     client_node_ = std::make_shared<rclcpp::Node>("test_node_client");
     service_node_ = std::make_shared<rclcpp::Node>("test_node_service");
+
+    cargo_loading_service_mock_ = std::make_shared<rclcpp::Node>("test_cargo_loading_service_mock", "");
 
     // define dio_ros_driver_node_mock start
     // Publisher
@@ -202,7 +214,7 @@ protected:
     // define cargo_loading_service_mock start
     // Subscriber
     sub_in_parking_state_ = cargo_loading_service_mock_->create_subscription<in_parking_msgs::msg::InParkingStatus>(
-      "/in_parking/state", 1,
+      "in_parking/state", rclcpp::QoS(1),
       [this](const in_parking_msgs::msg::InParkingStatus::SharedPtr msg)
       {
         std::lock_guard<std::mutex> lock(mtx_in_parking_state_);
@@ -312,7 +324,7 @@ protected:
     executor_.add_node(eve_node_output_sub_);
 
     spin_thread_ = std::thread([this]{
-      while (rclcpp::ok()) {
+      while (!stop_) {
         executor_.spin_once(std::chrono::milliseconds(50));
       }
     });
@@ -320,7 +332,8 @@ protected:
 
   void TearDown() override {
     if (spin_thread_.joinable()) {
-      rclcpp::shutdown();  // or stop flag
+      stop_ = true;
+      executor_.cancel();       // ★ spin_onceを中断
       spin_thread_.join();
     }
   }
@@ -472,16 +485,16 @@ TEST_F(EveCmdGateTest, Case_Initializing_SoundDone) {
   pub_initilization_state_->publish(initialization_state_initializing);
 
   // warning_lamp, emergency_lamp を待って期待値一致
-  ASSERT_TRUE(wait_for_in_parking_state(in_parking_msgs::msg::InParkingStatus::AW_UNAVAILABLE,
+  EXPECT_TRUE(wait_for_in_parking_state(in_parking_msgs::msg::InParkingStatus::AW_UNAVAILABLE,
     in_parking_msgs::msg::InParkingStatus::VEHICLE_MANUAL, 2000ms));
 
   // warning_lamp, emergency_lamp を待って期待値一致
-  ASSERT_TRUE(wait_for_warning_lamp(true, 2000ms));
-  ASSERT_TRUE(wait_for_emergency_lamp(true, 2000ms));
+  EXPECT_TRUE(wait_for_warning_lamp(true, 2000ms));
+  EXPECT_TRUE(wait_for_emergency_lamp(true, 2000ms));
 
   // status_lamp
   auto status_lamp_msgs = collect_status_lamp_msgs(8, 6000ms);
-  ASSERT_GE(status_lamp_msgs.size(), 6u);
+  EXPECT_GE(status_lamp_msgs.size(), 6u);
 
   EXPECT_TRUE(is_alternating(status_lamp_msgs));
 
@@ -489,15 +502,15 @@ TEST_F(EveCmdGateTest, Case_Initializing_SoundDone) {
   EXPECT_NEAR(period, PERIOD_SLOW_BLINK_SEC, TOL_SLOW_BLINK_SEC);
 
   // sound_done を待って期待値一致
-  ASSERT_TRUE(wait_for_sound_done(autoware_state_machine_msgs::msg::StateMachine::STATE_CHECK_NODE_ALIVE, 2000ms));
+  EXPECT_TRUE(wait_for_sound_done(autoware_state_machine_msgs::msg::StateMachine::STATE_CHECK_NODE_ALIVE, 2000ms));
 
   // warning_lamp, emergency_lamp を待って期待値一致
-  ASSERT_TRUE(wait_for_in_parking_state(in_parking_msgs::msg::InParkingStatus::AW_UNAVAILABLE,
+  EXPECT_TRUE(wait_for_in_parking_state(in_parking_msgs::msg::InParkingStatus::AW_UNAVAILABLE,
     in_parking_msgs::msg::InParkingStatus::VEHICLE_MANUAL, 2000ms));
 
   // warning_lamp, emergency_lamp を待って期待値一致
-  ASSERT_TRUE(wait_for_warning_lamp(true, 2000ms));
-  ASSERT_TRUE(wait_for_emergency_lamp(false, 2000ms));
+  EXPECT_TRUE(wait_for_warning_lamp(true, 2000ms));
+  EXPECT_TRUE(wait_for_emergency_lamp(false, 2000ms));
 
 }
 
@@ -512,13 +525,9 @@ TEST_F(EveCmdGateTest, Case_Initialized) {
   initialization_state_initializing.state = autoware_adapi_v1_msgs::msg::LocalizationInitializationState::INITIALIZING;
   pub_initilization_state_->publish(initialization_state_initializing);
 
-  // topicをpublishし終わったら、一旦待ち
-  {
-    auto start = std::chrono::steady_clock::now();
-    while ((std::chrono::steady_clock::now() - start) < std::chrono::seconds(5)) {
-      executor_.spin_once(std::chrono::milliseconds(100));
-    }
-  }
+  // executor のスピンは SetUp() のスレッドに任せる。
+  // ここでは単に少し待つ（または wait_* 系の条件変数待ちを使う）
+  std::this_thread::sleep_for(std::chrono::seconds(2));
 
   // target Input
   // 初期化完了
@@ -536,7 +545,7 @@ TEST_F(EveCmdGateTest, Case_Initialized) {
 
   // status_lamp
   auto status_lamp_msgs = collect_status_lamp_msgs(8, 6000ms);
-  ASSERT_GE(status_lamp_msgs.size(), 6u);
+  EXPECT_GE(status_lamp_msgs.size(), 6u);
 
   EXPECT_TRUE(is_alternating(status_lamp_msgs));
 
