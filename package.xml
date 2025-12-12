@@ -42,6 +42,9 @@
   <depend>sound_msgs</depend>
   <test_depend>ament_cmake_gtest</test_depend> 
   <test_depend>launch_testing_ament_cmake</test_depend>
+  <depend>shutdown_manager_msgs</depend>
+  
+  <depend>builtin_interfaces</depend>
 
   <export>
     <build_type>ament_cmake</build_type>
