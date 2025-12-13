@@ -42,6 +42,15 @@
   <depend>sound_msgs</depend>
   <test_depend>ament_cmake_gtest</test_depend> 
   <test_depend>launch_testing_ament_cmake</test_depend>
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>autoware_lint_common</test_depend>
+  <depend>ad_sound_manager</depend>
+  <depend>tier4_v2x_msgs</depend>
+  <depend>v2i_interface_msgs</depend>
+  <depend>autoware_vehicle_msgs</depend>
+  <depend>diagnostic_msgs</depend>
+  <depend>tier4_vehicle_msgs</depend>
+  <depend>tier4_api_msgs</depend>
 
   <export>
     <build_type>ament_cmake</build_type>
