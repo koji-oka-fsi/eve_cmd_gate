@@ -188,7 +188,9 @@ TEST_F(EveCmdGateTest, Case_shutdown_button_was_pressed_for_the_first_time) {
   executor.add_node(dio_ros_driver_sub_);
   clear_reservation_lamp_queue();
   //shutdownstateがshutdouwn_managerから渡される
-  msg_shutdown_state_.state =  shutdown_manager_msgs::msg::StateShutdown::STATE_INACTIVE_FOR_SHUTDOWN;
+  shutdown_manager_msgs::msg::StateShutdown shutdown_msg ;
+  shutdown_msg.state = shutdown_manager_msgs::msg::StateShutdown::STATE_INACTIVE_FOR_SHUTDOWN;
+  pub_shutdown_state_ -> publish(shutdown_msg);
   
   // reservation_lamp 0.5秒間隔で点滅
   auto delivery_lamp_msgs = collect_delivery_lamp_msgs(6, 1000ms);
@@ -208,7 +210,9 @@ TEST_F(EveCmdGateTest, Case_shutdown_button_was_pressed_for_the_second_time) {
   executor.add_node(dio_ros_driver_sub_);
   clear_reservation_lamp_queue();
   //shutdownstateがshutdouwn_managerから渡される
-  msg_shutdown_state_.state = shutdown_manager_msgs::msg::StateShutdown::STATE_SUCCESSFUL_SHUTDOWN_INITIATION;
+  shutdown_manager_msgs::msg::StateShutdown shutdown_msg ;
+  shutdown_msg.state = shutdown_manager_msgs::msg::StateShutdown::STATE_SUCCESSFUL_SHUTDOWN_INITIATION;
+  pub_shutdown_state_ -> publish(shutdown_msg);
   
   // status_lamp
   auto delivery_lamp_msgs = collect_delivery_lamp_msgs(12, 6300ms);
