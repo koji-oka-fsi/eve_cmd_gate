@@ -700,7 +700,7 @@ TEST_F(EveCmdGateTest, Case_STATE_INFORM_ENGAGE_button_press) {
 
      // TODO：期待値整理
   EXPECT_EQ(msgs_sound_voice_alarm_audio_cmd_.cmd_type, audio_driver_msgs::msg::SoundDriverCtrl::CMD_PLAY);
-  EXPECT_EQ(msgs_sound_voice_alarm_audio_cmd_.file_path, VOLUME_VOICE_ALARM);
+  EXPECT_EQ(msgs_sound_voice_alarm_audio_cmd_.file_path, "/home/autoware/pilot-auto.x1.eve/src/x1/dataset/ad_sound/wavs/default/start.wav");
   EXPECT_EQ(sound_bgm_audio_cmd_.cmd_type, audio_driver_msgs::msg::SoundDriverCtrl::CMD_VOLUME);
   EXPECT_EQ(sound_bgm_audio_cmd_.volume, VOLUME_LOW_BGM);
   EXPECT_EQ(sound_bgm_audio_cmd_.is_loop, true);
