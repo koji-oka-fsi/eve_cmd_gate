@@ -70,6 +70,11 @@ EveCmdGate::EveCmdGate(
     std::bind(&EveCmdGate::onStateSoundDone, this, std::placeholders::_1),
     subscribe_option);
 
+  sub_emergency_holding_ = this->create_subscription<HazardStatusStamped>(
+  "/system/emergency/hazard_status", rclcpp::QoS{1}.transient_local(),
+  std::bind(&EveCmdGate::onHazardStatusStamped, this, std::placeholders::_1),
+  subscribe_option);
+
   // Publisher
   pub_state_ = this->create_publisher<eve_cmd_gate_msgs::msg::EngageRequestState>(
   "/eve_cmd_gate/engage_request_state", rclcpp::QoS{1}.transient_local());
@@ -115,6 +120,7 @@ EveCmdGate::EveCmdGate(
   is_engage_accepted_ = false;
   routing_state_ = RouteState::UNKNOWN;
   routing_route_.data.clear();
+  is_emergency_holding_ = false;
 }
 
 void EveCmdGate::execEngageProcess(
@@ -148,7 +154,13 @@ void EveCmdGate::execEngageProcess(
     return;
   }
 
-  if (current_delivery_reservation_state_ ==
+  uint16_t lock_state;
+  {
+    std::lock_guard<std::shared_mutex> lock(lock_state_mtx_);
+    lock_state = current_delivery_reservation_state_;
+  }
+
+  if (lock_state ==
     autoware_state_machine_msgs::msg::StateLock::STATE_VERIFICATION)
   {
     RCLCPP_DEBUG_THROTTLE(
@@ -266,7 +278,7 @@ void EveCmdGate::setEngageProcess(bool request, bool accept)
      If you want to suspend waiting for playback to complete for some reason,
       set both values to "false". */
   {
-    std::lock_guard<std::shared_mutex> lock(mtx_);
+    std::lock_guard<std::shared_mutex> lock(engage_mtx_);
     is_engage_requesting_ = request;
     is_engage_accepted_ = accept;
   }
@@ -283,10 +295,27 @@ std::pair<bool, bool> EveCmdGate::getEngageProcess()
      Check both values to determine if the playback is played, interrupted, or completed. */
   std::pair<bool, bool> value;
   {
-    std::shared_lock<std::shared_mutex> lock(mtx_);
+    std::shared_lock<std::shared_mutex> lock(engage_mtx_);
     value = std::make_pair(is_engage_requesting_, is_engage_accepted_);
   }
   return value;
+}
+
+bool EveCmdGate::isEmergencyHolding(void)
+{
+  return is_emergency_holding_;
+}
+
+bool EveCmdGate::isRequestReset(void)
+{
+  bool is_request_reset = false;
+  auto [is_request, is_accept] = getEngageProcess();
+  if (is_request) {
+    if ((!isWaitingEngage() && !isDriving()) || isEmergencyHolding()) {
+      is_request_reset = true;
+    }
+  }
+  return is_request_reset;
 }
 
 void EveCmdGate::onOperationModeStatus(
@@ -295,23 +324,36 @@ void EveCmdGate::onOperationModeStatus(
   operation_state_.mode = msg->mode;
   operation_state_.is_autoware_control_enabled = msg->is_autoware_control_enabled;
   operation_state_.is_in_transition = msg->is_in_transition;
+  auto is_engage_requesting_reset = isRequestReset();
+  if (is_engage_requesting_reset) {
+    setEngageProcess(false, false);
+  }
 }
 
 void EveCmdGate::onRoutingStatus(
   const RouteState::SharedPtr msg)
 {
   routing_state_ = msg->state;
+  auto is_engage_requesting_reset = isRequestReset();
+  if (is_engage_requesting_reset) {
+    setEngageProcess(false, false);
+  }
 }
 
 void EveCmdGate::onRoutingRoute(
   const Route::SharedPtr msg)
 {
   routing_route_.data = msg->data;
+  auto is_engage_requesting_reset = isRequestReset();
+  if (is_engage_requesting_reset) {
+    setEngageProcess(false, false);
+  }
 }
 
 void EveCmdGate::onLockState(
   const StateLock::SharedPtr msg)
 {
+  std::lock_guard<std::shared_mutex> lock(lock_state_mtx_);
   current_delivery_reservation_state_ = msg->state;
 }
 
@@ -322,6 +364,16 @@ void EveCmdGate::onStateSoundDone(
   if (sound_param_.count(on_sound_done_state_) != 0) {
     on_sound_playing_flg_ = false;
     setEngageProcess(false, true);
+  }
+}
+
+void EveCmdGate::onHazardStatusStamped(
+  const HazardStatusStamped::SharedPtr msg)
+{
+  is_emergency_holding_ = msg->status.emergency_holding;
+  auto is_engage_requesting_reset = isRequestReset();
+  if (is_engage_requesting_reset) {
+    setEngageProcess(false, false);
   }
 }
 
