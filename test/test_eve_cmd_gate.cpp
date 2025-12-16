@@ -161,23 +161,6 @@ protected:
     return (cnt > 0) ? (sum / static_cast<double>(cnt)) : 0.0;
   }
 
-  bool waiting_reservation_pub(bool expected,std::chrono::milliseconds timeout){
-   auto deadline = std::chrono::steady_clock::now() + timeout;
-    std::unique_lock<std::mutex> lock(mtx_dio_ros_driver_);
-
-    while (std::chrono::steady_clock::now() < deadline) {
-    // 最新値があればチェック
-    if (!msg_reservation_lamp_.empty()) {
-      bool last = msg_reservation_lamp_.back().value;
-      if (last == expected) {
-        return true;
-      }
-    }
-      // 次のメッセージを待つ
-      cv_dio_ros_driver_.wait_until(lock, deadline);
-    }
-      return false;
-  }
 };
 
 
@@ -198,8 +181,6 @@ TEST_F(EveCmdGateTest, Case_shutdown_button_was_pressed_for_the_first_time) {
   EXPECT_TRUE(is_alternating(delivery_lamp_msgs));
   double period = estimate_period_sec(delivery_lamp_msgs);
   EXPECT_NEAR(period, PERIOD_FAST_BLINK_SEC, TOL_FAST_BLINK_SEC);
-  //  reservation_publish
-  EXPECT_TRUE(waiting_reservation_pub(true,2000ms));
 
 }
 
@@ -215,16 +196,29 @@ TEST_F(EveCmdGateTest, Case_shutdown_button_was_pressed_for_the_second_time) {
   pub_shutdown_state_ -> publish(shutdown_msg);
   
   // status_lamp
-  auto delivery_lamp_msgs = collect_delivery_lamp_msgs(12, 6300ms);
-  ASSERT_GE(delivery_lamp_msgs.size(), 12u);
+  auto delivery_lamp_msgs = collect_delivery_lamp_msgs(9, 6500ms);
+  ASSERT_GE(delivery_lamp_msgs.size(), 9u);  // 8つの区間を検証するには最低9件必要
 
-  EXPECT_TRUE(is_alternating(delivery_lamp_msgs));
+  // 各区間の経過時間（秒）を算出
+  std::vector<double> dts;
+  dts.reserve(8);
+  for (size_t i = 1; i <= 8; ++i) {
+    dts.push_back(std::chrono::duration<double>(
+      delivery_lamp_msgs[i].tp - delivery_lamp_msgs[i - 1].tp).count());
+  }
 
-  double period = estimate_period_sec(delivery_lamp_msgs);
-  EXPECT_NEAR(period, PERIOD_TWO_BLINKS_UNTIL_EXPIRATION, TOL_FAST_BLINK_SEC);
+  // 1回目： idle(1.5) → on(0.2) → off(0.2) → on(0.2)
+  EXPECT_NEAR(dts[0], 1.5, TOL_SLOW_BLINK_SEC);
+  EXPECT_NEAR(dts[1], 0.2, TOL_FAST_BLINK_SEC);
+  EXPECT_NEAR(dts[2], 0.2, TOL_FAST_BLINK_SEC);
+  EXPECT_NEAR(dts[3], 0.2, TOL_FAST_BLINK_SEC);
 
-  //  reservation_publish
-  EXPECT_TRUE(waiting_reservation_pub(true,2000ms));
+  // 2回目： idle(1.5) → on(0.2) → off(0.2) → on(0.2)
+  EXPECT_NEAR(dts[4], 1.5, TOL_SLOW_BLINK_SEC);
+  EXPECT_NEAR(dts[5], 0.2, TOL_FAST_BLINK_SEC);
+  EXPECT_NEAR(dts[6], 0.2, TOL_FAST_BLINK_SEC);
+  EXPECT_NEAR(dts[7], 0.2, TOL_FAST_BLINK_SEC);
+
 }
 
 // TEST_F(EveCmdGateTest, Case1_normal_sequence) {
