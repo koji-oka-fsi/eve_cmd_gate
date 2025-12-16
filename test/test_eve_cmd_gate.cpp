@@ -653,22 +653,17 @@ TEST_F(EveCmdGateTest, Case_STATE_INFORM_ENGAGE_button_press) {
   clear_reservation_lamp_queue();
 
   // target Input
-   auto request = std::make_shared<tier4_external_api_msgs::srv::Engage::Request>();
-   request->engage = true;
-   auto engage_future = cli_engage_->async_send_request(request);
-   auto result = executor_.spin_until_future_complete(engage_future, std::chrono::seconds(5));
-   ASSERT_EQ(result, rclcpp::FutureReturnCode::SUCCESS);
+  autoware_adapi_v1_msgs::msg::OperationModeState operation_mode_state;
+  operation_mode_state.is_autoware_control_enabled = true;
+  pub_operation_mode_state_->publish(operation_mode_state);
 
-  // topicをpublishし終わったら、一旦待ち
-  {
-    auto start = std::chrono::steady_clock::now();
-    while ((std::chrono::steady_clock::now() - start) < std::chrono::seconds(5)) {
-      executor_.spin_once(std::chrono::milliseconds(100));
-    }
-  }
-
+  auto request = std::make_shared<tier4_external_api_msgs::srv::Engage::Request>();
+  request->engage = true;
+  auto engage_future = cli_engage_->async_send_request(request);
   // eve_cmd_gateのreqestを待って期待値一致
   ASSERT_TRUE(wait_for_eve_cmd_gate_req(tier4_external_api_msgs::msg::Operator::AUTONOMOUS,2000ms));
+  auto result = executor_.spin_until_future_complete(engage_future, std::chrono::seconds(5));
+  ASSERT_EQ(result, rclcpp::FutureReturnCode::SUCCESS);
 
   if (msgs_requesting_.size() > 0) {
     EXPECT_TRUE(msgs_requesting_[0]);
