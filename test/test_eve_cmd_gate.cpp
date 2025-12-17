@@ -26,6 +26,7 @@
 #include "v2i_interface_msgs/msg/infrastructure_command_array.hpp"
 #include <tier4_external_api_msgs/msg/planning_factor_array.hpp>
 #include <autoware_adapi_v1_msgs/msg/vehicle_kinematics.hpp>
+#include "go_interface_msgs/msg/vehicle_status.hpp"
 #include <chrono>
 #include <atomic>
 
@@ -84,6 +85,8 @@ protected:
   rclcpp::Publisher<autoware_adapi_v1_msgs::msg::VehicleKinematics>::SharedPtr pub_vehicle_kinematics_;
   rclcpp::Publisher<eve_cmd_gate_msgs::msg::EngageRequestState>::SharedPtr pub_engage_process_state_;
   rclcpp::Publisher<autoware_state_machine_msgs::msg::StateSoundDone>::SharedPtr pub_state_sound_done_;
+  rclcpp::Publisher<autoware_state_machine_msgs::msg::StateLock>::SharedPtr pub_lock_state_;
+  rclcpp::Publisher<go_interface_msgs::msg::VehicleStatus>::SharedPtr pub_vehicle_state_;
 
   // Subscriber (Target Node Output)
   rclcpp::Subscription<autoware_state_machine_msgs::msg::StateLock>::SharedPtr sub_lock_state_;
@@ -201,6 +204,10 @@ protected:
     "/eve_cmd_gate/engage_request_state", rclcpp::QoS{1}.transient_local());
     pub_state_sound_done_ = adapi_mock_->create_publisher<autoware_state_machine_msgs::msg::StateSoundDone>(
     "/autoware_state_machine/state_sound_done", rclcpp::QoS{1}.transient_local());
+    pub_lock_state_ = adapi_mock_->create_publisher<autoware_state_machine_msgs::msg::StateLock>(
+    "/go_interface/lock_state", rclcpp::QoS{1}.transient_local());
+    pub_vehicle_state_ = adapi_mock_->create_publisher<go_interface_msgs::msg::VehicleStatus>(
+    "api_vehicle_status", rclcpp::QoS{1}.transient_local());
     // define ADAPI_mock end
 
     // define sound_voice_alarm/audio_driver_mock start
@@ -630,6 +637,22 @@ protected:
     pub_state_sound_done_->publish(done_msg);    
   }
 
+  // state lockをパブリッシュする
+  void publishStateLock(uint16_t state)
+  {
+    autoware_state_machine_msgs::msg::StateLock lock_msg;
+    lock_msg.state = state;
+    pub_lock_state_->publish(lock_msg);    
+  }
+
+  // voice_flgをパブリッシュする
+  void publishVoiceFlg(bool voice_flg)
+  {
+    go_interface_msgs::msg::VehicleStatus msg;
+    msg.voice_flg = voice_flg;
+    pub_vehicle_state_->publish(msg);    
+  }
+
   // sound_voice_alarm/audio_cmd を待つ（timeout 以内、期待値チェックあり）
 //   bool wait_for_sound_voice_alarm_audio_cmd(int32 expected_aw_state,
 //                          int32 expected_vehicle_operation_mode,
@@ -653,21 +676,74 @@ TEST_F(EveCmdGateTest, Case_AutoDrive_Running) {
   clear_warning_lamp_queue();
   clear_emergency_lamp_queue();
 
-  // DRIVING
+  // INITIALIZING_VEHICLE
+  // STATE_DURING_WAKEUP
+  publishSoundDone(autoware_state_machine_msgs::msg::StateMachine::STATE_CHECK_NODE_ALIVE);
+  rclcpp::sleep_for(2000ms);
+
+  // WAITING_FOR_ROUTE
   autoware_adapi_v1_msgs::msg::LocalizationInitializationState initialization_state_initializing;
   initialization_state_initializing.state = autoware_adapi_v1_msgs::msg::LocalizationInitializationState::INITIALIZED;
   pub_initilization_state_->publish(initialization_state_initializing);
+  rclcpp::sleep_for(2000ms);
 
   autoware_adapi_v1_msgs::msg::RouteState routing_state;
+  routing_state.state = autoware_adapi_v1_msgs::msg::RouteState::UNSET;
+  pub_routing_state_->publish(routing_state);
+  rclcpp::sleep_for(2000ms);
+  
+  // PLANNING
   routing_state.state = autoware_adapi_v1_msgs::msg::RouteState::SET;
   pub_routing_state_->publish(routing_state);
+  rclcpp::sleep_for(2000ms);
 
+  autoware_adapi_v1_msgs::msg::OperationModeState operation_mode_state;
+  operation_mode_state.mode = autoware_adapi_v1_msgs::msg::OperationModeState::UNKNOWN;
+  operation_mode_state.is_autoware_control_enabled = false;
+  pub_operation_mode_state_->publish(operation_mode_state);
+  rclcpp::sleep_for(2000ms);
+
+  // WAITING_FOR_ENGAGE
+  // STATE_WAITING_ENGAGE_INSTRUCTION
   autoware_adapi_v1_msgs::msg::Route routing_route;
   autoware_adapi_v1_msgs::msg::RouteData route_data;
   routing_route.data.push_back(route_data);
   pub_routing_route_->publish(routing_route);
+  rclcpp::sleep_for(2000ms);
 
-  autoware_adapi_v1_msgs::msg::OperationModeState operation_mode_state;
+  // STATE_WAITING_CALL_PERMISSION
+  publishVoiceFlg(true);
+  rclcpp::sleep_for(2000ms);
+  publishStateLock(autoware_state_machine_msgs::msg::StateLock::STATE_ON);
+  rclcpp::sleep_for(2000ms);
+
+  // STATE_INFORM_ENGAGE
+  publishStateLock(autoware_state_machine_msgs::msg::StateLock::STATE_VERIFICATION);
+  rclcpp::sleep_for(2000ms);
+  publishEngageRequest(true);
+  rclcpp::sleep_for(2000ms);
+
+  // STATE_INSTRUCT_ENGAGE
+  publishSoundDone(autoware_state_machine_msgs::msg::StateMachine::STATE_INFORM_ENGAGE);
+  rclcpp::sleep_for(2000ms);
+  publishEngageRequest(false);
+  rclcpp::sleep_for(2000ms);
+
+  // DRIVING
+  //autoware_adapi_v1_msgs::msg::LocalizationInitializationState initialization_state_initializing;
+  //initialization_state_initializing.state = autoware_adapi_v1_msgs::msg::LocalizationInitializationState::INITIALIZED;
+  //pub_initilization_state_->publish(initialization_state_initializing);
+
+  //autoware_adapi_v1_msgs::msg::RouteState routing_state;
+  //routing_state.state = autoware_adapi_v1_msgs::msg::RouteState::SET;
+  //pub_routing_state_->publish(routing_state);
+
+  //autoware_adapi_v1_msgs::msg::Route routing_route;
+  //autoware_adapi_v1_msgs::msg::RouteData route_data;
+  //routing_route.data.push_back(route_data);
+  //pub_routing_route_->publish(routing_route);
+
+  //autoware_adapi_v1_msgs::msg::OperationModeState operation_mode_state;
   operation_mode_state.mode = autoware_adapi_v1_msgs::msg::OperationModeState::AUTONOMOUS;
   operation_mode_state.is_autoware_control_enabled = true;
   pub_operation_mode_state_->publish(operation_mode_state);
@@ -719,8 +795,9 @@ TEST_F(EveCmdGateTest, Case_AutoDrive_Running) {
   routing_state.state = autoware_adapi_v1_msgs::msg::RouteState::SET;
   pub_routing_state_->publish(routing_state);
 
-  publishEngageRequest(false);
   publishSoundDone(autoware_state_machine_msgs::msg::StateMachine::STATE_INFORM_RESTART);
+  rclcpp::sleep_for(2000ms);
+  publishEngageRequest(false);
   rclcpp::sleep_for(2000ms);
 
   // STATE_RUNNING_TOWARD_STOP_LINE

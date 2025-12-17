@@ -43,6 +43,7 @@
   <depend>autoware_vehicle_msgs</depend>
   <depend>v2i_interface_msgs</depend>
   <depend>tier4_planning_msgs</depend>
+  <depend>go_interface_msgs</depend>
 
   <test_depend>launch_testing_ament_cmake</test_depend>
 
