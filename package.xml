@@ -41,6 +41,7 @@
   <depend>dio_ros_driver</depend>
   <depend>in_parking_msgs</depend>
   <depend>sound_msgs</depend>
+  <depend>ad_sound_manager</depend>
   <test_depend>ament_cmake_gtest</test_depend> 
   <test_depend>launch_testing_ament_cmake</test_depend>
 

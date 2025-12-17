@@ -21,6 +21,8 @@
 #include "std_srvs/srv/trigger.hpp"
 #include "tier4_external_api_msgs/srv/engage.hpp"
 #include "tier4_external_api_msgs/srv/set_operator.hpp"
+#include "autoware_system_msgs/msg/hazard_status_stamped.hpp"
+#include "ad_sound_manager/ad_sound_manager.hpp"
 #include <chrono>
 #include <atomic>
 
@@ -70,6 +72,7 @@ protected:
   rclcpp::Publisher<autoware_adapi_v1_msgs::msg::LocalizationInitializationState>::SharedPtr pub_initilization_state_;
   rclcpp::Publisher<audio_driver_msgs::msg::SoundDriverRes>::SharedPtr pub_voice_res_;
   rclcpp::Publisher<sound_msgs::msg::SoundRequest>::SharedPtr pub_sound_request_initialpose_;
+  rclcpp::Publisher<autoware_system_msgs::msg::HazardStatusStamped>::SharedPtr pub_emergency_holding_state_;
 
   // Subscriber (Target Node Output)
   rclcpp::Subscription<autoware_state_machine_msgs::msg::StateLock>::SharedPtr sub_lock_state_;
@@ -102,7 +105,7 @@ protected:
   std::deque<STLampDIO> msg_emergency_lamp_;
 
   // audio系メッセージ
-  audio_driver_msgs::msg::SoundDriverCtrl::ConstSharedPtr msgs_sound_voice_alarm_audio_cmd_;
+  audio_driver_msgs::msg::SoundDriverCtrl msgs_sound_voice_alarm_audio_cmd_;
   audio_driver_msgs::msg::SoundDriverCtrl sound_bgm_audio_cmd_;
 
   // parking系メッセージ
@@ -160,6 +163,8 @@ protected:
       "/api/routing/route", rclcpp::QoS{1}.transient_local());
     pub_initilization_state_ = adapi_mock_->create_publisher<autoware_adapi_v1_msgs::msg::LocalizationInitializationState>(
       "/api/localization/initialization_state", rclcpp::QoS{3}.transient_local());
+    pub_emergency_holding_state_ = adapi_mock_ ->create_publisher<autoware_system_msgs::msg::HazardStatusStamped>(
+     "/system/emergency/hazard_status", rclcpp::QoS{3}.transient_local());
     // define ADAPI_mock end
 
     // define sound_voice_alarm/audio_driver_mock start
@@ -171,7 +176,12 @@ protected:
       "/sound_voice_alarm/audio_cmd", rclcpp::QoS{5}.transient_local(),
       [this](const audio_driver_msgs::msg::SoundDriverCtrl::SharedPtr msg)
       {
-        msgs_sound_voice_alarm_audio_cmd_ = msg;
+        msgs_sound_voice_alarm_audio_cmd_.cmd_type =  msg->cmd_type;
+        //msgs_sound_voice_alarm_audio_cmd_.file_path = msg->file_path;
+        // msgs_sound_voice_alarm_audio_cmd_.volume = msg->volume;
+        // msgs_sound_voice_alarm_audio_cmd_.is_loop = msg->is_loop;
+        // msgs_sound_voice_alarm_audio_cmd_.loop_delay = msg->loop_delay;
+        // msgs_sound_voice_alarm_audio_cmd_.start_delay = msg->start_delay; = msg;
         cv_sound_voice_alarm_audio_cmd_.notify_all();
 
         audio_driver_msgs::msg::SoundDriverRes sound_res;
@@ -187,10 +197,10 @@ protected:
       [this](const audio_driver_msgs::msg::SoundDriverCtrl::SharedPtr msg)
       {
         // TODO：必要に応じて実装
-        // sound_bgm_audio_cmd_.type msg->cmd_type;
+         sound_bgm_audio_cmd_.cmd_type = msg->cmd_type;
         // sound_bgm_audio_cmd_.file_path = msg->file_path;
-        // sound_bgm_audio_cmd_.volume = msg->volume;
-        // sound_bgm_audio_cmd_.is_loop = msg->is_loop;
+         sound_bgm_audio_cmd_.volume = msg->volume;
+         sound_bgm_audio_cmd_.is_loop = msg->is_loop;
         // sound_bgm_audio_cmd_.loop_delay = msg->loop_delay;
         // sound_bgm_audio_cmd_.start_delay = msg->start_delay;
       }
@@ -233,8 +243,8 @@ protected:
       [this](const eve_cmd_gate_msgs::msg::EngageRequestState::SharedPtr msg)
       {
         // TODO：必要に応じて実装
-        // msgs_requesting_.push_back(msg->is_engage_requesting);
-        // msgs_accepted_.push_back(msg->is_engage_accepted);
+         msgs_requesting_.push_back(msg->is_engage_requesting);
+         msgs_accepted_.push_back(msg->is_engage_accepted);
       }
     );
     sub_lock_state_ = eve_node_output_sub_->create_subscription<autoware_state_machine_msgs::msg::StateLock>(
@@ -405,6 +415,17 @@ protected:
     return (cnt > 0) ? (sum / static_cast<double>(cnt)) : 0.0;
   }
 
+  // status_lamp を待つ（timeout 以内、期待値チェックあり）
+  bool wait_for_status_lamp(bool expected_status_lamp,
+                         std::chrono::milliseconds timeout = 2000ms) {
+    std::unique_lock<std::mutex> lock(mtx_status_lamp_);
+    bool ok = cv_status_lamp_.wait_for(lock, timeout, [this]{ return !msg_status_lamp_.empty(); });
+    if (!ok) return false;
+
+    auto msg = msg_status_lamp_.front();
+    msg_status_lamp_.clear();
+    return msg.value == expected_status_lamp;
+  }
   // warning_lamp を待つ（timeout 以内、期待値チェックあり）
   bool wait_for_warning_lamp(bool expected_warning_lamp,
                          std::chrono::milliseconds timeout = 2000ms) {
@@ -473,6 +494,34 @@ protected:
 
 };
 
+TEST_F(EveCmdGateTest, Case_emergency_holding) {
+  clear_status_lamp_queue();
+  clear_warning_lamp_queue();
+  clear_emergency_lamp_queue();
+  // target Input
+  autoware_system_msgs::msg::HazardStatusStamped emergency_holding;
+  emergency_holding.status.emergency_holding = true;
+  pub_emergency_holding_state_->publish(emergency_holding);
+
+  EXPECT_EQ(msgs_sound_voice_alarm_audio_cmd_.cmd_type, audio_driver_msgs::msg::SoundDriverCtrl::CMD_STOP);
+  EXPECT_EQ(sound_bgm_audio_cmd_.cmd_type, audio_driver_msgs::msg::SoundDriverCtrl::CMD_PLAY);
+  EXPECT_EQ(sound_bgm_audio_cmd_.volume, VOLUME_ZERO_BGM);
+  EXPECT_EQ(msgs_sound_voice_alarm_audio_cmd_.cmd_type, audio_driver_msgs::msg::SoundDriverCtrl::CMD_STOP);
+
+  EXPECT_TRUE(wait_for_status_lamp(true, 2000ms));
+  EXPECT_TRUE(wait_for_emergency_lamp(true, 2000ms));
+  EXPECT_TRUE(wait_for_warning_lamp(false, 2000ms));
+  // warning_lamp, emergency_lamp を待って期待値一致
+  EXPECT_TRUE(wait_for_in_parking_state(in_parking_msgs::msg::InParkingStatus::AW_EMERGENCY,
+    in_parking_msgs::msg::InParkingStatus::VEHICLE_AUTO, 2000ms));
+  EXPECT_TRUE(wait_for_in_parking_state(in_parking_msgs::msg::InParkingStatus::AW_UNAVAILABLE,
+    in_parking_msgs::msg::InParkingStatus::VEHICLE_MANUAL, 2000ms)); 
+
+  if (msgs_requesting_.size() > 2) {
+    EXPECT_FALSE(msgs_requesting_[2]);
+    EXPECT_FALSE(msgs_accepted_[2]);
+  }
+}
 TEST_F(EveCmdGateTest, Case_Initializing_SoundDone) {
   clear_status_lamp_queue();
   clear_warning_lamp_queue();
